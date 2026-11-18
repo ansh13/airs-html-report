@@ -21,7 +21,7 @@ git clone https://github.com/ansh13/airs-html-report.git
 cd airs-html-report
 ```
 
-> This repo is intended to be **private** — it is tooling for an AIRS tenant and expects a service-account credential.
+> This is a **public** tool, but it expects a service-account credential at runtime. **Never commit your real `credentials.json` or any CSV export** — both are git-ignored by default (see [Security notes](#security-notes)).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
