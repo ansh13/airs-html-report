@@ -10,7 +10,7 @@ Generates **one self-contained HTML file** summarizing the three Prisma AIRS pil
 
 Each pillar **degrades gracefully** to an "unavailable" note if its inputs are missing, so the report always renders. Cross-platform — runs on Windows and macOS.
 
-> Built by the TME team for Prisma AIRS.
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
