@@ -1,0 +1,10 @@
+# This tool uses only the Python standard library for the API-Intercept pillar.
+#
+# The Model Scanning pillar needs the Palo Alto `model-security-client` SDK, which
+# is NOT on public PyPI — do not `pip install model-security-client` from PyPI
+# (that name is a broken stub). The script auto-installs the real SDK from the
+# private Palo Alto index on first run, using your credentials.json.
+#
+# The SDK requires Python 3.11-3.13 (not 3.14).
+#
+# There are therefore no mandatory public dependencies to install here.

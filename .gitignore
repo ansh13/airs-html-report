@@ -1,0 +1,21 @@
+# Real credentials — NEVER commit these
+credentials.json
+
+# SCM activity-log exports (may contain scanned content / PII)
+ai_security_airs_api_intercept*.csv
+*.csv
+
+# Generated reports (may contain tenant data: API key names, violations, models)
+airs_report.html
+report.html
+*.out.html
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
