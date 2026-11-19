@@ -280,14 +280,16 @@ def parse_log_time(s):
     return None
 
 
-def load_intercept(csv_path, group_col, days=None):
+def load_intercept(csv_path, group_col, days=None, exclude=None):
     agg = {k: Counter() for k in
            ("total", "req_total", "resp_total", "benign", "violations",
             "viol_req", "viol_resp", "blocked", "alerted")}
     reasons = defaultdict(lambda: defaultdict(Counter))
+    exclude_lc = {e.strip().lower() for e in (exclude or ()) if e.strip()}
     rows_read = 0
     rows_total = 0
     rows_skipped = 0
+    rows_excluded = 0
     with open(csv_path, newline="", encoding="utf-8", errors="replace") as fh:
         reader = csv.DictReader(fh)
         required = {group_col, "Verdict", "Action", "AI Incident Type",
@@ -309,8 +311,13 @@ def load_intercept(csv_path, group_col, days=None):
                     if rows_total % 250_000 == 0:
                         print(f"  ...processed {rows_total:,} rows", file=sys.stderr)
                     continue
-            rows_read += 1
             grp = norm(row, group_col) or "(unknown)"
+            if exclude_lc and grp.lower() in exclude_lc:
+                rows_excluded += 1
+                if rows_total % 250_000 == 0:
+                    print(f"  ...processed {rows_total:,} rows", file=sys.stderr)
+                continue
+            rows_read += 1
             itype = norm(row, "AI Incident Type")
             verdict = norm(row, "Verdict").lower()
             action = norm(row, "Action").lower()
@@ -340,7 +347,7 @@ def load_intercept(csv_path, group_col, days=None):
                 c["block" if action == BLOCK_ACTION else "allow"] += 1
             if rows_total % 250_000 == 0:
                 print(f"  ...processed {rows_total:,} rows", file=sys.stderr)
-    return agg, reasons, rows_read, rows_total, rows_skipped
+    return agg, reasons, rows_read, rows_total, rows_skipped, rows_excluded
 
 
 # ── HTML ───────────────────────────────────────────────────────────────────────
@@ -354,7 +361,8 @@ def card(label, value, cls=""):
 
 
 def intercept_section(group_col, csv_name, rows_read, agg, reasons,
-                      days=None, rows_total=None, rows_skipped=None):
+                      days=None, rows_total=None, rows_skipped=None,
+                      excludes=None, rows_excluded=0):
     g_total = agg["total"]
     groups = sorted(g_total, key=lambda g: g_total[g], reverse=True)
     tot = sum(g_total.values()); ben = sum(agg["benign"].values())
@@ -391,6 +399,10 @@ def intercept_section(group_col, csv_name, rows_read, agg, reasons,
                        f"({rows_skipped:,} of {rows_total:,} rows outside window excluded)")
     else:
         window_note = f" · last {days} days"
+    # Exclusion note: list any groups the user filtered out of this pillar.
+    if excludes:
+        window_note += (f" · excluded {', '.join(sorted(excludes))}"
+                        f" ({rows_excluded:,} rows)")
     return f"""
   <h2>API-Intercept (AI Runtime Security)</h2>
   <p class="src">Source: <strong>{esc(csv_name)}</strong> · grouped by <strong>{esc(group_col)}</strong> · {rows_read:,} log rows · {len(groups)} groups{window_note}</p>
@@ -511,17 +523,27 @@ def main():
     ap.add_argument("--creds", default=None, help="Path to credentials.json (default: look in dir/cwd)")
     ap.add_argument("--out", default=os.path.join(SCRIPT_DIR, "airs_report.html"),
                     help="Output HTML path")
+    ap.add_argument("--exclude", action="append", metavar="NAME",
+                    help="API-Intercept group value(s) to omit from the report "
+                         "(repeatable; comma-separated OK). Default: Duggie-Dev-Test_APP. "
+                         'Pass --exclude "" to disable.')
     args = ap.parse_args()
+
+    # Groups to drop from API-Intercept. Default removes the known dev/test key;
+    # any --exclude value(s) replace that default.
+    raw_exclude = args.exclude if args.exclude is not None else ["Duggie-Dev-Test_APP"]
+    excludes = {e.strip() for item in raw_exclude for e in item.split(",") if e.strip()}
 
     # Pillar 1 — API-Intercept (offline, always attempted)
     csv_path = find_csv(args.csv_path)
     if csv_path:
-        agg, reasons, rows_read, rows_total, rows_skipped = load_intercept(
-            csv_path, args.group_by, args.days)
+        agg, reasons, rows_read, rows_total, rows_skipped, rows_excluded = load_intercept(
+            csv_path, args.group_by, args.days, exclude=excludes)
         intercept_html = intercept_section(args.group_by, os.path.basename(csv_path),
                                            rows_read, agg, reasons,
                                            days=args.days, rows_total=rows_total,
-                                           rows_skipped=rows_skipped)
+                                           rows_skipped=rows_skipped,
+                                           excludes=excludes, rows_excluded=rows_excluded)
     else:
         intercept_html = (f'<h2>API-Intercept (AI Runtime Security)</h2>'
                           f'<p class="na">No CSV found. Pass a path or place a '
