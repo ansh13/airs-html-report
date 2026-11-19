@@ -53,6 +53,76 @@ SUMMARY_TYPE = "ai-traffic"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _TOKEN = None
+_WARNED_NO_TS = set()
+
+
+# ── timestamp helpers (enforce --days client-side on live pillars) ─────────────
+def _parse_any_time(v):
+    """Best-effort parse of a timestamp into an aware UTC datetime.
+
+    Handles datetime objects, epoch seconds/millis, ISO-8601 (with or without
+    'Z'/offset), and the SCM log format. Naive values are assumed to be UTC.
+    Returns None if nothing parses.
+    """
+    if v is None:
+        return None
+    if isinstance(v, dt.datetime):
+        return v if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            ts = float(v)
+            if ts > 1e12:          # looks like milliseconds
+                ts /= 1000.0
+            return dt.datetime.fromtimestamp(ts, dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        pass
+    return parse_log_time(s)
+
+
+def record_time(d):
+    """Find the most 'created-like' timestamp on an API record dict.
+
+    Scans keys in priority order (creation > start/scan > any time/date) so it
+    adapts to whatever the API actually names the field.
+    """
+    if not isinstance(d, dict):
+        return None
+    passes = (
+        lambda k: "creat" in k.lower(),
+        lambda k: any(h in k.lower() for h in ("start", "scan_time", "timestamp")),
+        lambda k: "time" in k.lower() or "date" in k.lower(),
+    )
+    for match in passes:
+        for k in d:
+            if match(k):
+                t = _parse_any_time(d[k])
+                if t is not None:
+                    return t
+    return None
+
+
+def within_window(d, since, pillar):
+    """True if record d falls within [since, now]. Records with no detectable
+    timestamp are KEPT, but we warn once per pillar so field names can be fixed
+    rather than silently reintroducing the full server-default window."""
+    t = record_time(d)
+    if t is None:
+        if pillar not in _WARNED_NO_TS:
+            _WARNED_NO_TS.add(pillar)
+            print(f"  WARNING [{pillar}]: no timestamp field detected on records; "
+                  f"--days window NOT enforced for these. Keys seen: "
+                  f"{sorted(d.keys()) if isinstance(d, dict) else type(d).__name__}",
+                  file=sys.stderr)
+        return True
+    return t >= since
 
 
 # ── auth + live API helpers (ported from exec_report.py) ───────────────────────
@@ -124,6 +194,9 @@ def load_model_scanning(creds, days):
         scans += page; skip += len(page)
         if len(page) < 100:
             break
+    # Enforce the --days window client-side: the API may ignore start_time/end_time
+    # and return its server default (often ~90 days), so trim to the window here.
+    scans = [s for s in scans if within_window(s, since, "model-scanning")]
     verd = Counter(str(s.get("eval_outcome", "?")).split(".")[-1] for s in scans)
     reasons = Counter(); allowed_alerts = 0
     for s in scans:
@@ -145,15 +218,14 @@ def load_red_teaming(creds, days):
     now = dt.datetime.now(dt.timezone.utc); since = now - dt.timedelta(days=days)
     targets = api_get(creds, "/ai-red-teaming/mgmt-plane/v1/target").get("data", [])
     scans = api_get(creds, "/ai-red-teaming/data-plane/v1/scan").get("data", [])
-
-    def parse(x):
-        try:
-            return dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
-        except Exception:
-            return None
-    recent = [s for s in scans if parse(s.get("created_at")) and parse(s["created_at"]) >= since]
+    # Enforce the --days window client-side against each scan's detected timestamp
+    # (the endpoint returns its server-default window, often ~90 days).
+    recent = [s for s in scans if within_window(s, since, "red-teaming")]
+    def when(s):
+        t = record_time(s)
+        return t.date().isoformat() if t else str(s.get("created_at", ""))[:10]
     rows = [{"Scan": s.get("name"), "Target type": s.get("target_type"),
-             "Status": s.get("status"), "When": str(s.get("created_at", ""))[:10]}
+             "Status": s.get("status"), "When": when(s)}
             for s in recent]
     return {"targets": len(targets), "scans": len(recent),
             "targets_scanned": len({s.get("target_id") for s in recent}),
