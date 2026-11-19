@@ -301,20 +301,11 @@ def load_intercept(csv_path, group_col, days=None, exclude=None):
         if missing:
             sys.exit(f"ERROR: CSV missing expected columns: {sorted(missing)}")
         has_scan_id = SCAN_COL in (reader.fieldnames or [])
-        # Date-window filter: only applied when --days is set AND the export has a
-        # timestamp column. Older exports without it fall back to no filtering.
-        cutoff = None
-        if days is not None and TIME_COL in (reader.fieldnames or []):
-            cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+        # No time filtering: every row in the export is processed so the result is
+        # deterministic (depends only on the file, not on when it is run). Scans are
+        # deduplicated by Scan ID below.
         for row in reader:
             rows_total += 1
-            if cutoff is not None:
-                ts = parse_log_time(row.get(TIME_COL))
-                if ts is not None and ts < cutoff:
-                    rows_skipped += 1
-                    if rows_total % 250_000 == 0:
-                        print(f"  ...processed {rows_total:,} rows", file=sys.stderr)
-                    continue
             grp = norm(row, group_col) or "(unknown)"
             if exclude_lc and grp.lower() in exclude_lc:
                 rows_excluded += 1
@@ -477,7 +468,6 @@ def red_teaming_section(rt, err):
 
 
 def render_html(title, tenant, days, intercept_html, ms_html, rt_html):
-    since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -515,7 +505,7 @@ def render_html(title, tenant, days, intercept_html, ms_html, rt_html):
   .none {{ color:#64748b; font-style:italic; }}
 </style></head><body>
   <h1>{esc(title)}</h1>
-  <p class="caption">Tenant {esc(tenant)} · Last {days} days (since {since}) · Generated {dt.date.today()}</p>
+  <p class="caption">Tenant {esc(tenant)} · All logs in export (no time filter) · Generated {dt.date.today()}</p>
   {intercept_html}
   {ms_html}
   {rt_html}
