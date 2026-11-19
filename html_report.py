@@ -391,21 +391,9 @@ def intercept_section(group_col, csv_name, rows_read, agg, reasons,
           <td class="num alert">{agg["alerted"][g]:,}</td>
           <td>{reasons_cell}</td>
         </tr>""")
-    # Window note: explain whether the CSV was date-filtered to the --days window.
-    if days is None:
-        window_note = ""
-    elif rows_skipped:
-        window_note = (f" · last {days} days "
-                       f"({rows_skipped:,} of {rows_total:,} rows outside window excluded)")
-    else:
-        window_note = f" · last {days} days"
-    # Exclusion note: list any groups the user filtered out of this pillar.
-    if excludes:
-        window_note += (f" · excluded {', '.join(sorted(excludes))}"
-                        f" ({rows_excluded:,} rows)")
     return f"""
   <h2>API-Intercept (AI Runtime Security)</h2>
-  <p class="src">Source: <strong>{esc(csv_name)}</strong> · grouped by <strong>{esc(group_col)}</strong> · {rows_read:,} log rows · {len(groups)} groups{window_note}</p>
+  <p class="src">Source: <strong>{esc(csv_name)}</strong> · grouped by <strong>{esc(group_col)}</strong> · {rows_read:,} log rows</p>
   <div class="cards">
     {card("Total Requests", f"{tot:,}")}
     {card("Benign", f"{ben:,}", "benign")}
