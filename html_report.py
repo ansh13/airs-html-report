@@ -281,10 +281,13 @@ def parse_log_time(s):
 
 
 def load_intercept(csv_path, group_col, days=None, exclude=None):
-    agg = {k: Counter() for k in
-           ("total", "req_total", "resp_total", "benign", "violations",
-            "viol_req", "viol_resp", "blocked", "alerted")}
-    reasons = defaultdict(lambda: defaultdict(Counter))
+    # Scan-level counting: in the SCM export, ONE scan = MANY rows (one per
+    # detector subtype, plus prompt/response). We dedup by "Scan ID" and take the
+    # worst outcome across a scan's rows (malicious wins, block wins), so totals
+    # match the Streamlit report. Scans with no Scan ID fall back to per-row.
+    SCAN_COL = "Scan ID"
+    scan = {}            # sid -> [group, malicious, blocked, has_req, has_resp]
+    scan_reasons = {}    # sid -> set(reason_label) of detectors that fired
     exclude_lc = {e.strip().lower() for e in (exclude or ()) if e.strip()}
     rows_read = 0
     rows_total = 0
@@ -297,6 +300,7 @@ def load_intercept(csv_path, group_col, days=None, exclude=None):
         missing = required - set(reader.fieldnames or [])
         if missing:
             sys.exit(f"ERROR: CSV missing expected columns: {sorted(missing)}")
+        has_scan_id = SCAN_COL in (reader.fieldnames or [])
         # Date-window filter: only applied when --days is set AND the export has a
         # timestamp column. Older exports without it fall back to no filtering.
         cutoff = None
@@ -322,31 +326,47 @@ def load_intercept(csv_path, group_col, days=None, exclude=None):
             verdict = norm(row, "Verdict").lower()
             action = norm(row, "Action").lower()
             d = direction(row)
-            if itype == SUMMARY_TYPE:
-                agg["total"][grp] += 1
-                if d == "request":
-                    agg["req_total"][grp] += 1
-                elif d == "response":
-                    agg["resp_total"][grp] += 1
-                if verdict == VIOLATION_VERDICT:
-                    agg["violations"][grp] += 1
-                    if d == "request":
-                        agg["viol_req"][grp] += 1
-                    elif d == "response":
-                        agg["viol_resp"][grp] += 1
-                    if action == BLOCK_ACTION:
-                        agg["blocked"][grp] += 1
-                    else:
-                        agg["alerted"][grp] += 1
-                else:
-                    agg["benign"][grp] += 1
-            elif itype and verdict == VIOLATION_VERDICT:
-                c = reasons[grp][reason_label(itype, norm(row, "AI Incident Subtype"))]
-                c["total"] += 1
-                c[d] += 1
-                c["block" if action == BLOCK_ACTION else "allow"] += 1
+            sid = (norm(row, SCAN_COL) if has_scan_id else "") or f"__row{rows_read}"
+            rec = scan.get(sid)
+            if rec is None:
+                rec = [grp, False, False, False, False]
+                scan[sid] = rec
+            elif rec[0] == "(unknown)" and grp != "(unknown)":
+                rec[0] = grp                       # fill in a real group name if we get one
+            if verdict == VIOLATION_VERDICT:
+                rec[1] = True                      # worst outcome: malicious wins
+            if action == BLOCK_ACTION:
+                rec[2] = True                      # worst outcome: block wins
+            if d == "request":
+                rec[3] = True
+            elif d == "response":
+                rec[4] = True
+            if itype and itype != SUMMARY_TYPE and verdict == VIOLATION_VERDICT:
+                scan_reasons.setdefault(sid, set()).add(
+                    reason_label(itype, norm(row, "AI Incident Subtype")))
             if rows_total % 250_000 == 0:
                 print(f"  ...processed {rows_total:,} rows", file=sys.stderr)
+
+    # Roll up per-scan records into per-group aggregates.
+    agg = {k: Counter() for k in
+           ("total", "req_total", "resp_total", "benign", "violations",
+            "blocked", "alerted")}
+    reasons = defaultdict(lambda: defaultdict(Counter))
+    for sid, (g, mal, blk, req, resp) in scan.items():
+        agg["total"][g] += 1
+        if req:
+            agg["req_total"][g] += 1
+        if resp:
+            agg["resp_total"][g] += 1
+        if mal:
+            agg["violations"][g] += 1
+            agg["blocked" if blk else "alerted"][g] += 1
+        else:
+            agg["benign"][g] += 1
+        for r in scan_reasons.get(sid, ()):
+            rc = reasons[g][r]
+            rc["scans"] += 1
+            rc["block" if blk else "allow"] += 1
     return agg, reasons, rows_read, rows_total, rows_skipped, rows_excluded
 
 
@@ -369,12 +389,11 @@ def intercept_section(group_col, csv_name, rows_read, agg, reasons,
     vio = sum(agg["violations"].values()); blk = sum(agg["blocked"].values())
     body = []
     for g in groups:
-        rlist = sorted(reasons[g].items(), key=lambda kv: kv[1]["total"], reverse=True)
+        rlist = sorted(reasons[g].items(), key=lambda kv: kv[1]["scans"], reverse=True)
         if rlist:
             items = "".join(
                 f'<li><span class="rname">{esc(r)}</span>'
-                f'<span class="rc">{c["total"]} '
-                f'<em class="dir">(req {c["request"]} · resp {c["response"]})</em> '
+                f'<span class="rc">{c["scans"]} '
                 f'<em class="blk">▰ {c["block"]} blocked</em> · '
                 f'<em class="alw">▰ {c["allow"]} alert</em></span></li>'
                 for r, c in rlist)
@@ -384,9 +403,9 @@ def intercept_section(group_col, csv_name, rows_read, agg, reasons,
         body.append(f"""
         <tr>
           <td class="app">{esc(g)}</td>
-          <td class="num">{g_total[g]:,}<span class="sub2">{agg["req_total"][g]:,} req · {agg["resp_total"][g]:,} resp</span></td>
+          <td class="num">{g_total[g]:,}<span class="sub2">{agg["req_total"][g]:,} w/ prompt · {agg["resp_total"][g]:,} w/ resp</span></td>
           <td class="num benign">{agg["benign"][g]:,}</td>
-          <td class="num viol">{agg["violations"][g]:,}<span class="sub2">{agg["viol_req"][g]:,} req · {agg["viol_resp"][g]:,} resp</span></td>
+          <td class="num viol">{agg["violations"][g]:,}</td>
           <td class="num block">{agg["blocked"][g]:,}</td>
           <td class="num alert">{agg["alerted"][g]:,}</td>
           <td>{reasons_cell}</td>
@@ -395,14 +414,14 @@ def intercept_section(group_col, csv_name, rows_read, agg, reasons,
   <h2>API-Intercept (AI Runtime Security)</h2>
   <p class="src">Source: <strong>{esc(csv_name)}</strong> · grouped by <strong>{esc(group_col)}</strong> · {rows_read:,} log rows</p>
   <div class="cards">
-    {card("Total Requests", f"{tot:,}")}
+    {card("Total scans", f"{tot:,}")}
     {card("Benign", f"{ben:,}", "benign")}
     {card("Violations", f"{vio:,}", "viol")}
     {card("Blocked", f"{blk:,}", "block")}
   </div>
   <table>
     <thead><tr>
-      <th>{esc(group_col)}</th><th>Requests</th><th>Benign</th><th>Violations</th>
+      <th>{esc(group_col)}</th><th>Scans</th><th>Benign</th><th>Violations</th>
       <th>Blocked</th><th>Alert only</th><th>Reason of violation</th>
     </tr></thead>
     <tbody>{''.join(body)}</tbody>
